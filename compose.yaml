@@ -1,0 +1,19 @@
+services:
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: batch
+      POSTGRES_PASSWORD: batch
+      POSTGRES_DB: batch
+    ports:
+      - "5433:5432"
+    volumes:
+      - db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U batch -d batch"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+volumes:
+  db:

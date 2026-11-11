@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Tests (real Postgres via Testcontainers)
+        run: npm test
+      - name: The generator writes the same file every time
+        run: |
+          npm run generate -- --rows 50000 --out a.csv
+          npm run generate -- --rows 50000 --out b.csv
+          cmp a.csv b.csv

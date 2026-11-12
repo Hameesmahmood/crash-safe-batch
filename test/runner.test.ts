@@ -79,6 +79,21 @@ describe("Runner, running the ledger import", () => {
     for (const id of ids) expect(await count(db, "SELECT * FROM ledger_entries WHERE run_id = $1", [id])).toBe(2000);
   });
 
+  it("leaves a run alone while its worker's lease is live, and takes it over once it expires", async () => {
+    const runner = testRunner(db, { workerId: "second" });
+    const id = await runner.store.create("ledger-import", { file });
+    // The first worker claims the run and then goes silent: no checkpoints, so no lease renewals.
+    await runner.store.claim("first", ["ledger-import"]);
+
+    expect(await runner.runUntilIdle()).toBe(0);
+    expect(await count(db, "SELECT * FROM ledger_entries")).toBe(0);
+
+    await db.pool.query("UPDATE runs SET lease_expires_at = now() - interval '1 second'");
+    expect(await runner.runUntilIdle()).toBe(1);
+    expect(await runner.store.get(id)).toMatchObject({ status: "succeeded" });
+    expect(await ledgerDigest(db.pool)).toBe(await baselineDigest(file));
+  });
+
   it("never claims a finished run again", async () => {
     const runner = testRunner(db);
     const id = await runner.store.create("ledger-import", { file });

@@ -54,14 +54,19 @@ const ledgerImport = defineWorkflow("ledger-import", [
 
 **The transactional checkpoint.** Every chunk runs in one transaction:
 
-1. `UPDATE runs SET version = version + 1, cursor = $next, lease_expires_at = now() + lease
+1. The step's own writes for the chunk (ledger entries, balance updates).
+2. `UPDATE runs SET version = version + 1, cursor = $next, lease_expires_at = now() + lease
    WHERE id = $id AND version = $expected`. Zero rows means another worker owns the run, so roll back
    and stop.
-2. The step's own writes for the chunk (ledger entries, balance updates).
 3. `COMMIT`.
 
 A crash at any point keeps both the writes and the checkpoint, or neither. Database work is therefore
 exactly once, and a resumed run is indistinguishable from an uninterrupted one.
+
+The version check comes last on purpose. Checking it first would lock the run's row for the whole
+chunk, which is pessimistic locking in disguise. Checking it at the end means no lock is held while
+the work happens, so another worker can take over a stalled run, and the stalled worker finds out
+when its commit fails.
 
 **State machine.** Run status follows `pending → running → succeeded`, or
 `running → compensating → compensated` when a step fails for good. `compensating → failed` happens
@@ -73,9 +78,9 @@ rejects illegal moves, and the SQL that changes status also checks the current s
 `FOR UPDATE SKIP LOCKED`. Every chunk commit extends the lease, so a live worker keeps its run. A dead
 worker's run is picked up by another worker after the lease expires (30 s by default).
 
-**Optimistic locking.** The version check in step 1 stops a stale worker, one that froze past its
-lease while another worker took over, from committing its chunk. Postgres row locks serialise the two
-updates, and the loser sees zero rows.
+**Optimistic locking.** The version check in step 2 stops a stale worker, one that froze past its
+lease while another worker took over, from committing its chunk. Every write bumps the version, so a
+matching version also proves the status the worker read is still current.
 
 **Resuming.** A batch step's cursor is the number of input rows already handled. On resume the source
 skips that many rows (csv-parse's `from_line`) and carries on. Re-parsing the skipped rows is cheap

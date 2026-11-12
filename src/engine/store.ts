@@ -39,7 +39,8 @@ export interface Changes {
 
 /**
  * Every write the engine makes to a run. Each one is a compare-and-set on `version`: it applies only
- * if nobody has changed the run since this worker last read it. That's the optimistic lock.
+ * if nobody has changed the run since this worker last read it. That's the optimistic lock. Every
+ * write bumps the version, so a matching version also proves the status this worker read is current.
  */
 export class RunStore {
   protected readonly pool: Pool;
@@ -138,7 +139,7 @@ export class RunStore {
   }
 
   protected async advance(db: Pool | PoolClient, run: RunRow, changes: Changes): Promise<RunRow> {
-    const params: unknown[] = [run.id, run.version, run.status];
+    const params: unknown[] = [run.id, run.version];
     const sets = ["version = version + 1", "updated_at = now()"];
     const set = (column: string, value: unknown) => {
       params.push(value);
@@ -168,7 +169,7 @@ export class RunStore {
     }
 
     const { rows } = await db.query(
-      `UPDATE runs SET ${sets.join(", ")} WHERE id = $1 AND version = $2 AND status = $3 RETURNING *`,
+      `UPDATE runs SET ${sets.join(", ")} WHERE id = $1 AND version = $2 RETURNING *`,
       params,
     );
     if (!rows[0]) throw new LostOwnership(run.id);

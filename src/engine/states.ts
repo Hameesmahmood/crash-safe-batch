@@ -1,6 +1,6 @@
 /**
- * The run state machine. Every status change in the engine goes through `assertMove`, and the SQL
- * that applies it also checks the current status, so an illegal move fails in both places.
+ * The run state machine. Every status change in the engine goes through `assertMove`. The write that
+ * applies it is a compare-and-set on the run's version, so the status it was checked against is current.
  *
  *   pending ──> running ──> succeeded
  *                  │

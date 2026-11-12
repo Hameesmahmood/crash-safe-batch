@@ -25,11 +25,13 @@ CREATE TABLE runs (
 CREATE INDEX runs_claimable ON runs (lease_expires_at NULLS FIRST)
     WHERE status IN ('pending', 'running', 'compensating');
 
--- Which steps of a run have finished, so compensation knows what to undo.
+-- How far each step got, so compensation knows what to undo. A batch step that failed halfway is
+-- 'partial': its committed chunks (the first `rows` input rows) still need undoing.
 CREATE TABLE run_steps (
     run_id      bigint      NOT NULL REFERENCES runs (id),
     step_index  int         NOT NULL,
-    status      text        NOT NULL CHECK (status IN ('done', 'compensated')),
+    status      text        NOT NULL CHECK (status IN ('done', 'partial', 'compensated')),
+    rows        bigint      NOT NULL DEFAULT 0,
     finished_at timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (run_id, step_index)
 );

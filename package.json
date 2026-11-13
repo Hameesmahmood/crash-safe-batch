@@ -11,7 +11,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "generate": "node tools/generate-csv.ts"
+    "generate": "node tools/generate-csv.ts",
+    "stub": "node tools/statement-service.ts"
   },
   "dependencies": {
     "csv-parse": "^7.0.3",

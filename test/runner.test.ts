@@ -1,31 +1,37 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ledgerDigest } from "../src/example/ledger.ts";
-import { createTestDatabase, type TestDatabase } from "./db.ts";
-import { balancesFromCsv, baselineDigest, count, testRunner, writeCsv } from "./helpers.ts";
+import { balances, balancesFromCsv, baselineDigest, count, createFixture, ledger, testRunner, writeCsv, type Fixture } from "./helpers.ts";
 import { failsOnceAfterWrites } from "./workflows.ts";
 
 describe("Runner, running the ledger import", () => {
   let file: string;
-  let db: TestDatabase;
+  let db: Fixture;
   beforeAll(async () => {
     file = await writeCsv(2000);
   });
   beforeEach(async () => {
-    db = await createTestDatabase();
+    db = await createFixture();
   });
   afterEach(() => db.drop());
 
-  it("posts every transaction exactly once and finishes the run", async () => {
+  it("posts every transaction exactly once, builds statements, notifies once and finishes the run", async () => {
     const runner = testRunner(db);
     const id = await runner.store.create("ledger-import", { file });
     await runner.runUntilIdle();
 
-    expect(await runner.store.get(id)).toMatchObject({ status: "succeeded", stepIndex: 1, leaseOwner: null, leaseExpiresAt: null });
+    expect(await runner.store.get(id)).toMatchObject({ status: "succeeded", stepIndex: 3, leaseOwner: null, leaseExpiresAt: null });
     expect(await count(db, "SELECT * FROM ledger_entries")).toBe(2000);
     expect(await count(db, "SELECT DISTINCT source_line FROM ledger_entries")).toBe(2000);
-    const steps = await db.pool.query("SELECT status, rows FROM run_steps WHERE run_id = $1", [id]);
-    expect(steps.rows).toEqual([{ status: "done", rows: "2000" }]);
+    const steps = await db.pool.query("SELECT step_index, status, rows FROM run_steps WHERE run_id = $1 ORDER BY step_index", [id]);
+    expect(steps.rows).toEqual([
+      { step_index: 0, status: "done", rows: "2000" },
+      { step_index: 1, status: "done", rows: "0" },
+      { step_index: 2, status: "done", rows: "0" },
+    ]);
+    expect(await count(db, "SELECT * FROM statements WHERE status = 'issued'")).toBe(await count(db, "SELECT * FROM accounts"));
+    expect(db.service.requests).toBe(1);
+    expect(JSON.parse(db.service.accepted.get(`ledger-import/${id}`)!)).toMatchObject({ run: id, entries: 2000 });
   });
 
   it("ends with the balances you get by adding up the CSV by hand", async () => {
@@ -33,8 +39,7 @@ describe("Runner, running the ledger import", () => {
     await runner.store.create("ledger-import", { file });
     await runner.runUntilIdle();
 
-    const { rows } = await db.pool.query<{ id: number; balance_cents: string }>("SELECT id, balance_cents FROM accounts");
-    expect(new Map(rows.map((a) => [a.id, Number(a.balance_cents)]))).toEqual(balancesFromCsv(file));
+    expect(await balances(db)).toEqual(balancesFromCsv(file));
   });
 
   it("records each entry's running balance in file order", async () => {
@@ -54,7 +59,7 @@ describe("Runner, running the ledger import", () => {
 
   it("resumes from the last checkpoint after a chunk fails, with the same result as a clean run", async () => {
     const sources: number[] = [];
-    const runner = testRunner(db, { workflow: failsOnceAfterWrites(700, sources) });
+    const runner = testRunner(db, { workflow: failsOnceAfterWrites(ledger(db), 700, sources) });
     const id = await runner.store.create("ledger-import", { file });
     await runner.runUntilIdle();
 

@@ -5,10 +5,34 @@ import { join } from "node:path";
 import { Runner, type RunnerOptions } from "../src/engine/runner.ts";
 import type { Workflow } from "../src/engine/workflow.ts";
 import { ledgerDigest, ledgerImport, type LedgerInput } from "../src/example/ledger.ts";
+import { startStatementService, type StatementService } from "../src/example/statement-service.ts";
 import { generateTransactions } from "../src/example/transactions.ts";
 import { createTestDatabase, type TestDatabase } from "./db.ts";
 
 export const quiet = () => {};
+
+/** A fresh database and a fresh statement service, so tests share neither rows nor idempotency keys. */
+export interface Fixture extends TestDatabase {
+  service: StatementService;
+}
+
+export async function createFixture(): Promise<Fixture> {
+  const db = await createTestDatabase();
+  const service = await startStatementService();
+  return {
+    ...db,
+    service,
+    drop: async () => {
+      await service.close();
+      await db.drop();
+    },
+  };
+}
+
+/** The ledger import, pointed at this fixture's statement service. */
+export function ledger(db: Fixture, chunkSize = 100): Workflow<LedgerInput> {
+  return ledgerImport({ chunkSize, statementServiceUrl: db.service.url });
+}
 
 /** Writes a seeded CSV to a temporary folder and returns its path. */
 export async function writeCsv(rows: number, seed = 1): Promise<string> {
@@ -19,11 +43,11 @@ export async function writeCsv(rows: number, seed = 1): Promise<string> {
 }
 
 /** A runner tuned for tests: silent, retries at once, short polls. */
-export function testRunner(db: TestDatabase, options: Partial<RunnerOptions> & { workflow?: Workflow<LedgerInput> } = {}): Runner {
+export function testRunner(db: Fixture, options: Partial<RunnerOptions> & { workflow?: Workflow<LedgerInput> } = {}): Runner {
   const { workflow, ...rest } = options;
   return new Runner({
     pool: db.pool,
-    workflows: [workflow ?? ledgerImport({ chunkSize: 100 })],
+    workflows: [workflow ?? ledger(db)],
     retryDelayMs: () => 0,
     pollMs: 10,
     log: quiet,
@@ -37,9 +61,9 @@ const baselines = new Map<string, string>();
 export async function baselineDigest(file: string, chunkSize = 100): Promise<string> {
   const key = `${file}:${chunkSize}`;
   if (!baselines.has(key)) {
-    const db = await createTestDatabase();
+    const db = await createFixture();
     try {
-      const runner = testRunner(db, { workflow: ledgerImport({ chunkSize }) });
+      const runner = testRunner(db, { workflow: ledger(db, chunkSize) });
       await runner.store.create("ledger-import", { file });
       await runner.runUntilIdle();
       baselines.set(key, await ledgerDigest(db.pool));
@@ -60,7 +84,7 @@ export function balancesFromCsv(file: string): Map<number, number> {
   return balances;
 }
 
-export async function count(db: TestDatabase, sql: string, params: unknown[] = []): Promise<number> {
+export async function count(db: Fixture, sql: string, params: unknown[] = []): Promise<number> {
   const { rows } = await db.pool.query<{ n: string }>(`SELECT count(*) AS n FROM (${sql}) q`, params);
   return Number(rows[0]!.n);
 }
@@ -79,4 +103,10 @@ export async function eventually(condition: () => Promise<boolean>, timeoutMs = 
     if (Date.now() > deadline) throw new Error("Timed out waiting for a condition.");
     await new Promise((r) => setTimeout(r, 20));
   }
+}
+
+/** Every account's balance, by account. */
+export async function balances(db: Fixture): Promise<Map<number, number>> {
+  const { rows } = await db.pool.query<{ id: number; balance_cents: string }>("SELECT id, balance_cents FROM accounts");
+  return new Map(rows.map((a) => [a.id, Number(a.balance_cents)]));
 }

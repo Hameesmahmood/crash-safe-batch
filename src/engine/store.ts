@@ -128,6 +128,68 @@ export class RunStore {
     });
   }
 
+  /**
+   * The current step failed for good. Records how much of it committed (a batch step that failed
+   * halfway still has chunks to undo), then points the run at the last step with work to undo.
+   * The worker keeps its lease and carries on with the undo.
+   */
+  async beginCompensation(run: RunRow, options: { error: string; committedRows: number }): Promise<RunRow> {
+    return this.transaction(async (tx) => {
+      if (options.committedRows > 0) {
+        await tx.query("INSERT INTO run_steps (run_id, step_index, status, rows) VALUES ($1, $2, 'partial', $3)", [
+          run.id,
+          run.stepIndex,
+          options.committedRows,
+        ]);
+      }
+      const last = await this.lastStepToUndo(tx, run.id);
+      return this.advance(tx, run, {
+        status: "compensating",
+        stepIndex: last ?? run.stepIndex,
+        cursor: 0,
+        attempt: 0,
+        error: options.error,
+        lease: "renew",
+      });
+    });
+  }
+
+  /** How many input rows of the run's current step committed, if that step has anything to undo. */
+  async rowsToUndo(run: RunRow): Promise<number | undefined> {
+    const { rows } = await this.pool.query<{ rows: string }>(
+      "SELECT rows FROM run_steps WHERE run_id = $1 AND step_index = $2 AND status IN ('done', 'partial')",
+      [run.id, run.stepIndex],
+    );
+    return rows[0] ? Number(rows[0].rows) : undefined;
+  }
+
+  /**
+   * Marks the current step undone, in the same transaction as the undo's last writes, and moves
+   * to the next step back. After the first step, the run is compensated.
+   */
+  async completeUndo(run: RunRow, work?: (tx: PoolClient) => Promise<void>): Promise<RunRow> {
+    return this.transaction(async (tx) => {
+      await work?.(tx);
+      await tx.query("UPDATE run_steps SET status = 'compensated', finished_at = now() WHERE run_id = $1 AND step_index = $2", [
+        run.id,
+        run.stepIndex,
+      ]);
+      const next = await this.lastStepToUndo(tx, run.id);
+      return this.advance(
+        tx,
+        run,
+        next === undefined
+          ? { status: "compensated", stepIndex: 0, cursor: 0, attempt: 0, lease: "clear" }
+          : { stepIndex: next, cursor: 0, attempt: 0, lease: "renew" },
+      );
+    });
+  }
+
+  /** An undo failed for good. The run stops where it is, half undone, for a person to look at. */
+  async giveUp(run: RunRow, error: string): Promise<RunRow> {
+    return this.advance(this.pool, run, { status: "failed", error, lease: "clear" });
+  }
+
   /** A try of the current step failed. Hand the run back, to be claimed again after a delay. */
   async recordFailure(run: RunRow, error: string, retryInMs: number): Promise<RunRow> {
     return this.advance(this.pool, run, { attempt: run.attempt + 1, error, lease: { retryInMs } });
@@ -174,6 +236,14 @@ export class RunStore {
     );
     if (!rows[0]) throw new LostOwnership(run.id);
     return toRun(rows[0]);
+  }
+
+  private async lastStepToUndo(tx: PoolClient, runId: string): Promise<number | undefined> {
+    const { rows } = await tx.query<{ step_index: number | null }>(
+      "SELECT max(step_index) AS step_index FROM run_steps WHERE run_id = $1 AND status IN ('done', 'partial')",
+      [runId],
+    );
+    return rows[0]?.step_index ?? undefined;
   }
 
   protected async transaction<T>(work: (tx: PoolClient) => Promise<T>): Promise<T> {

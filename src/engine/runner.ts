@@ -2,7 +2,7 @@ import { hostname } from "node:os";
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Pool } from "pg";
 import { LostOwnership, RunStore, type RunRow } from "./store.ts";
-import type { BatchStep, RunInfo, SimpleStep, Step, Workflow } from "./workflow.ts";
+import { PermanentError, type BatchStep, type ChunkContext, type RunInfo, type Step, type Workflow } from "./workflow.ts";
 
 export type Log = (event: string, fields?: Record<string, unknown>) => void;
 
@@ -85,95 +85,136 @@ export class Runner {
     const workflow = this.workflows.get(claimed.workflow)!;
     const current: Current = { run: claimed };
     this.log("claimed", { run: claimed.id, status: claimed.status, step: claimed.stepIndex, cursor: claimed.cursor });
-    try {
-      while (current.run.status === "running") {
-        const step = workflow.steps[current.run.stepIndex]!;
-        if (step.kind === "batch") await this.runBatch(current, step, workflow);
-        else await this.runSimple(current, step, workflow);
-      }
-      if (current.run.status === "succeeded") this.log("succeeded", { run: claimed.id });
-    } catch (error) {
-      if (error instanceof Stopping) return;
-      if (error instanceof LostOwnership) {
-        this.log("lost ownership", { run: claimed.id });
-        return;
-      }
-      await this.fail(current.run, workflow.steps[current.run.stepIndex]!, error);
-    }
-  }
 
-  private async runBatch<I>(current: Current, step: BatchStep<I, unknown>, workflow: Workflow<I>): Promise<void> {
-    const info = runInfo<I>(current.run);
-    let chunk: unknown[] = [];
-
-    // The source is pulled one row at a time, and the next row is only pulled after the previous
-    // chunk has committed. That is the backpressure: a slow database slows the reader down.
-    for await (const row of step.source(info.input, current.run.cursor)) {
-      chunk.push(row);
-      if (chunk.length === step.size) {
-        await this.commit(current, step, info, chunk);
-        chunk = [];
-        await this.stopIfAsked(current.run);
+    // Forwards through the steps while running, backwards through the finished ones while compensating.
+    while (current.run.status === "running" || current.run.status === "compensating") {
+      const step = workflow.steps[current.run.stepIndex]!;
+      try {
+        if (current.run.status === "running") await this.forward(current, step, workflow);
+        else await this.undo(current, step);
+      } catch (error) {
+        if (error instanceof Stopping) return;
+        if (error instanceof LostOwnership) {
+          this.log("lost ownership", { run: claimed.id });
+          return;
+        }
+        if (!(await this.fail(current, step, error))) return;
       }
     }
-    if (chunk.length > 0) await this.commit(current, step, info, chunk);
-
-    const rows = current.run.cursor;
-    current.run = await this.store.completeStep(current.run, { rows, last: this.isLast(current.run, workflow) });
-    this.log("step done", { run: info.id, step: step.name, rows });
-    await this.stopIfAsked(current.run);
+    this.log(current.run.status, { run: claimed.id, error: current.run.error ?? undefined });
   }
 
-  private async commit<I>(current: Current, step: BatchStep<I, unknown>, info: RunInfo<I>, rows: unknown[]): Promise<void> {
-    const firstRow = current.run.cursor;
-    current.run = await this.store.commitChunk(current.run, firstRow + rows.length, (tx) =>
-      step.handle(rows, { run: info, tx, signal: this.signal, firstRow }),
-    );
-  }
-
-  private async runSimple<I>(current: Current, step: SimpleStep<I>, workflow: Workflow<I>): Promise<void> {
+  private async forward<I>(current: Current, step: Step<I>, workflow: Workflow<I>): Promise<void> {
     const info = runInfo<I>(current.run);
-    current.run = await this.store.completeStep(current.run, {
-      rows: 0,
-      last: this.isLast(current.run, workflow),
-      work: (tx) => step.run({ run: info, tx, signal: this.signal }),
-    });
+    const last = current.run.stepIndex === workflow.steps.length - 1;
+    if (step.kind === "batch") {
+      await this.chunks(current, step, info, Infinity, step.handle);
+      current.run = await this.store.completeStep(current.run, { rows: current.run.cursor, last });
+    } else {
+      current.run = await this.store.completeStep(current.run, {
+        rows: 0,
+        last,
+        work: (tx) => step.run({ run: info, tx, signal: this.signal }),
+      });
+    }
     this.log("step done", { run: info.id, step: step.name });
     await this.stopIfAsked(current.run);
   }
 
-  private async fail<I>(run: RunRow, step: Step<I>, error: unknown): Promise<void> {
+  /** Undoes the current step: only the rows it committed, chunk by chunk, checkpointed like the forward pass. */
+  private async undo<I>(current: Current, step: Step<I>): Promise<void> {
+    const info = runInfo<I>(current.run);
+    const rows = await this.store.rowsToUndo(current.run);
+    if (rows === undefined || !step.compensate) {
+      // Never ran, or has nothing to undo.
+      current.run = await this.store.completeUndo(current.run);
+    } else if (step.kind === "batch") {
+      await this.chunks(current, step, info, rows, step.compensate);
+      current.run = await this.store.completeUndo(current.run);
+      this.log("step undone", { run: info.id, step: step.name, rows });
+    } else {
+      current.run = await this.store.completeUndo(current.run, (tx) => step.compensate!({ run: info, tx, signal: this.signal }));
+      this.log("step undone", { run: info.id, step: step.name });
+    }
+    await this.stopIfAsked(current.run);
+  }
+
+  /**
+   * Feeds the step's rows, from the run's cursor up to `limit`, through `handler` in chunks, each in
+   * a transaction with its checkpoint. The source is pulled one row at a time, and the next row is
+   * only pulled after the previous chunk has committed. That is the backpressure: a slow database
+   * slows the reader down.
+   */
+  private async chunks<I, R>(
+    current: Current,
+    step: BatchStep<I, R>,
+    info: RunInfo<I>,
+    limit: number,
+    handler: (rows: R[], ctx: ChunkContext<I>) => Promise<void>,
+  ): Promise<void> {
+    let chunk: R[] = [];
+    const flush = async () => {
+      const firstRow = current.run.cursor;
+      const rows = chunk;
+      chunk = [];
+      current.run = await this.store.commitChunk(current.run, firstRow + rows.length, (tx) =>
+        handler(rows, { run: info, tx, signal: this.signal, firstRow }),
+      );
+      await this.stopIfAsked(current.run);
+    };
+
+    if (current.run.cursor >= limit) return;
+    for await (const row of step.source(info.input, current.run.cursor)) {
+      chunk.push(row);
+      const end = current.run.cursor + chunk.length;
+      if (chunk.length === step.size || end === limit) await flush();
+      if (end === limit) return; // Leaving the loop closes the source.
+    }
+    if (chunk.length > 0) await flush();
+  }
+
+  /**
+   * Decides what a failure means. Returns true if this worker should carry on with the run, which
+   * happens when it has just moved the run to compensating.
+   */
+  private async fail<I>(current: Current, step: Step<I>, error: unknown): Promise<boolean> {
+    const run = current.run;
     const message = error instanceof Error ? error.message : String(error);
     const tries = run.attempt + 1;
+    const fields = { run: run.id, step: step.name, status: run.status, attempt: tries, error: message };
     try {
-      if (tries < step.attempts) {
+      if (tries < step.attempts && !(error instanceof PermanentError)) {
         const delay = this.retryDelayMs(tries);
-        await this.store.recordFailure(run, message, delay);
-        this.log("step failed, will retry", { run: run.id, step: step.name, attempt: tries, retryInMs: delay, error: message });
-      } else {
-        // Out of tries. Compensation (undoing finished steps) arrives with the saga support; until
-        // then the run waits here, failed but not yet compensated.
-        await this.store.recordFailure(run, message, 0x7fffffff);
-        this.log("step failed for good", { run: run.id, step: step.name, attempt: tries, error: message });
+        current.run = await this.store.recordFailure(run, message, delay);
+        this.log("step failed, will retry", { ...fields, retryInMs: delay });
+        return false;
       }
+      if (run.status === "running") {
+        // The rows this step committed before failing are undone along with the finished steps.
+        const committedRows = step.kind === "batch" ? run.cursor : 0;
+        current.run = await this.store.beginCompensation(run, { error: `${step.name}: ${message}`, committedRows });
+        this.log("step failed for good, compensating", fields);
+        return true;
+      }
+      current.run = await this.store.giveUp(run, `undoing ${step.name}: ${message}`);
+      this.log("undo failed for good", fields);
+      return false;
     } catch (recordError) {
-      if (recordError instanceof LostOwnership) this.log("lost ownership", { run: run.id });
-      else throw recordError;
+      if (recordError instanceof LostOwnership) {
+        this.log("lost ownership", { run: run.id });
+        return false;
+      }
+      throw recordError;
     }
   }
 
   private async stopIfAsked(run: RunRow): Promise<void> {
-    if (!this.signal.aborted || run.status !== "running") return;
+    if (!this.signal.aborted || (run.status !== "running" && run.status !== "compensating")) return;
     await this.store.release(run);
-    this.log("released on shutdown", { run: run.id, step: run.stepIndex, cursor: run.cursor });
+    this.log("released on shutdown", { run: run.id, status: run.status, step: run.stepIndex, cursor: run.cursor });
     throw new Stopping();
   }
-
-  private isLast(run: RunRow, workflow: Workflow<unknown>): boolean {
-    return run.stepIndex === workflow.steps.length - 1;
-  }
 }
-
 function runInfo<I>(run: RunRow): RunInfo<I> {
   return { id: run.id, workflow: run.workflow, input: run.input as I };
 }

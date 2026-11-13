@@ -1,10 +1,12 @@
 // Usage:
 //   node src/cli.ts start <csv file>     queue a ledger import and print its run ID
-//   node src/cli.ts worker [--chunk 500] work until stopped (Ctrl-C or SIGTERM stops it cleanly)
+//   node src/cli.ts worker [--chunk 500] work until stopped. Ctrl-C or SIGTERM lets the current chunk
+//                                        commit and hands the run back; a second signal quits at once
 //   node src/cli.ts status <run id>      show a run
 //   node src/cli.ts digest               fingerprint of the ledger, for comparing two databases
 //
-// Connects to DATABASE_URL, or the database from compose.yaml.
+// Connects to DATABASE_URL, or the database from compose.yaml. The notify step calls
+// STATEMENT_SERVICE_URL, or the stub from `npm run stub` on port 4100.
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pg from "pg";
@@ -17,6 +19,7 @@ const { positionals, values } = parseArgs({
   options: {
     chunk: { type: "string", default: "500" },
     lease: { type: "string", default: "30000" },
+    "shutdown-deadline": { type: "string", default: "10000" },
   },
 });
 const [command, arg] = positionals;
@@ -25,7 +28,11 @@ const pool = new pg.Pool({ connectionString: process.env.DATABASE_URL ?? "postgr
 try {
   await migrate(pool);
   // The cursor counts rows, not chunks, so workers can use any chunk size, even mid-run.
-  const runner = new Runner({ pool, workflows: [ledgerImport({ chunkSize: Number(values.chunk) })], leaseMs: Number(values.lease) });
+  const workflow = ledgerImport({
+    chunkSize: Number(values.chunk),
+    statementServiceUrl: process.env.STATEMENT_SERVICE_URL ?? "http://127.0.0.1:4100",
+  });
+  const runner = new Runner({ pool, workflows: [workflow], leaseMs: Number(values.lease) });
 
   switch (command) {
     case "start": {
@@ -34,7 +41,21 @@ try {
       break;
     }
     case "worker": {
-      for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => runner.stop());
+      const deadlineMs = Number(values["shutdown-deadline"]);
+      const shutDown = (signal: NodeJS.Signals) => {
+        if (runner.signal.aborted) {
+          // Second signal: quit now. The open transaction rolls back, which is safe, just slower to recover.
+          console.error(`${signal} again, exiting without waiting`);
+          process.exit(130);
+        }
+        runner.stop();
+        // If the chunk in progress hangs, don't wait forever. Exiting rolls it back, which is safe.
+        setTimeout(() => {
+          console.error(`shutdown took longer than ${deadlineMs} ms, exiting`);
+          process.exit(1);
+        }, deadlineMs).unref();
+      };
+      for (const signal of ["SIGTERM", "SIGINT"] as const) process.on(signal, shutDown);
       await runner.work();
       break;
     }

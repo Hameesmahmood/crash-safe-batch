@@ -72,7 +72,8 @@ when its commit fails.
 `running → compensating → compensated` when a step fails for good. `compensating → failed` happens
 only if an undo itself fails for good, which needs a human. A paused or crashed run returns from
 `running` to the claimable pool when its lease expires. All transitions go through one function that
-rejects illegal moves, and the SQL that changes status also checks the current status.
+rejects illegal moves, and the write that applies a transition is a version compare-and-set, so the
+status it was checked against is still current.
 
 **Claiming and leases.** Workers claim a `pending` or lease-expired `running` run with
 `FOR UPDATE SKIP LOCKED`. Every chunk commit extends the lease, so a live worker keeps its run. A dead
@@ -89,29 +90,46 @@ next to writing them, and a row count is simpler and safer than a byte offset.
 **Backpressure.** The CSV is read as a stream through an async iterator. The worker pulls the next
 chunk only after the previous one commits, so the parser pauses whenever the database is behind.
 Rows held in memory stay within one chunk plus the stream's small buffer, however large the file.
+Measured on a 20,000-row file against a deliberately slow database: at most 1,605 parsed rows ahead
+of the last commit (one chunk of 100 plus one 64 KiB read), against 19,800 when the file is read
+ahead into a queue.
 
-**Saga compensation.** If a step fails permanently (a non-retryable error, or `attempts` used up), the
-run moves to `compensating`. The `compensate` functions of the finished steps run in reverse order.
-For `post`, that means writing reversing ledger entries, never deleting, as a real ledger would. A
-batch step's compensation is itself checkpointed and resumable, so a crash during compensation
-finishes the undo, never doubles it.
+**Saga compensation.** If a step fails permanently (it throws `PermanentError`, or uses up its
+`attempts`), the run moves to `compensating`. The `compensate` functions of the finished steps run in
+reverse order. A batch step that failed halfway is recorded as `partial` with the number of rows it
+committed, and only those rows are undone. For `post`, undoing means writing a reversing entry for
+each entry the ledger says was posted, never deleting, as a real ledger would. A batch step's
+compensation is itself checkpointed and resumable, so a crash during compensation finishes the undo,
+never doubles it. Within one step, chunks are undone in the same order they were done: reversing
+entries cancel out in any order, and reading the source forwards keeps the cursor meaning the same
+thing in both directions. If an undo itself fails for good, the run stops as `failed`, half undone,
+for a person to look at.
 
-**External calls.** `notify` sends the run ID as an idempotency key, so a retry after a crash is safe
-for the receiver. The statement service is a small stub that can be told to fail.
+**External calls.** `notify` sends `ledger-import/<run id>` as an idempotency key, so a retry after a
+crash is safe for the receiver. Server errors and timeouts are retried; a 4xx (other than 408 and 429)
+means the request is wrong, so it fails for good at once. The statement service is a small stub that
+accepts each key once, answers a repeat with 200, rejects the same key with a different body with
+409, and can be told to fail. Tests start it in-process; `npm run stub` runs it as its own process.
+The call is made inside the step's transaction, which holds a database connection open for up to the
+5-second timeout. That's fine for one call per run; a step making many calls should use an outbox
+instead.
 
 **Graceful shutdown.** On `SIGTERM` or `SIGINT`, the worker stops pulling new chunks, lets the current
 chunk commit, then releases its lease (`lease_expires_at = now()`) so another worker can claim the run
-straight away. If the chunk doesn't finish within the shutdown deadline, the process exits anyway and
-the transaction rolls back, which is still safe.
+straight away. This works the same while compensating. If the chunk doesn't finish within the
+shutdown deadline (10 s by default), or a second signal arrives, the process exits anyway and the
+transaction rolls back, which is still safe.
 
 ### Data model
 
 - `runs`: `id`, `workflow`, `input` (jsonb), `status`, `step_index`, `cursor`, `version`,
   `lease_owner`, `lease_expires_at`, `attempt`, `error`, `created_at`, `updated_at`.
-- `run_steps`: `run_id`, `step_index`, `status` (`done`, `compensated`), `compensate_cursor`. This
-  records which steps finished, so compensation knows what to undo.
-- The example's tables: `accounts` (`id`, `balance_cents`), `ledger_entries` (`run_id`, `line_no`,
-  `txn_id`, `account_id`, `amount_cents`, `balance_after_cents`, `reverses_line_no`), `statements`.
+- `run_steps`: `run_id`, `step_index`, `status` (`done`, `partial`, `compensated`), `rows`. This
+  records which steps finished, and how far a failed batch step got, so compensation knows what to
+  undo. While compensating, the run's own `step_index` and `cursor` track the undo.
+- The example's tables: `accounts` (`id`, `balance_cents`), `ledger_entries` (`run_id`, `source_line`,
+  `txn_id`, `account_id`, `amount_cents`, `balance_after_cents`, `reversal`), `statements` (one per
+  account per run, `issued` or `void`).
 
 `ledger_entries` has **no** unique constraint on `txn_id`, on purpose. Production code would add one
 as a second line of defence. Leaving it out lets the crash test see a duplicate instead of turning it
@@ -121,8 +139,8 @@ into a constraint error.
 
 - `src/engine/`: workflow definitions, state machine, runner, claiming, checkpoints, shutdown.
   It knows nothing about ledgers.
-- `src/example/`: the ledger import workflow, CSV source and statement-service client.
-- `src/cli.ts`: `start`, `worker` and `status` commands.
+- `src/example/`: the ledger import workflow, CSV source, statement-service client and stub.
+- `src/cli.ts`: `start`, `worker`, `status` and `digest` commands.
 - `tools/`: CSV generator (seeded, deterministic), statement-service stub, crash harness, benchmark,
   chart script.
 - `test/`: Vitest, with integration tests on real Postgres via Testcontainers.

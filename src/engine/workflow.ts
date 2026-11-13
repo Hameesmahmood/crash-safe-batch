@@ -1,5 +1,16 @@
 import type { PoolClient } from "pg";
 
+/**
+ * Throw this from a step when trying again can't help, such as a request the other side rejected
+ * as invalid. The run skips its remaining attempts and goes straight to compensation.
+ */
+export class PermanentError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "PermanentError";
+  }
+}
+
 export interface RunInfo<I> {
   id: string;
   workflow: string;
@@ -39,7 +50,10 @@ export interface BatchStep<I, R> {
   /** Yields the step's input rows, skipping the first `from`. Pulled lazily, so a slow consumer slows the source. */
   source(input: I, from: number): AsyncIterable<R>;
   handle(rows: R[], ctx: ChunkContext<I>): Promise<void>;
-  /** Undoes a chunk. Runs over the same rows and chunk size as `handle`, and is checkpointed the same way. */
+  /**
+   * Undoes a chunk. Runs over the same rows and chunk size as `handle`, in the same order, and is
+   * checkpointed the same way, so a crash mid-undo resumes the undo instead of repeating it.
+   */
   compensate?(rows: R[], ctx: ChunkContext<I>): Promise<void>;
 }
 

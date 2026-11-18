@@ -31,9 +31,11 @@ const DEFAULT_CHUNK = 500;
 const num = (n: number) => n.toLocaleString("en");
 const compact = (n: number) => (n >= 1000 ? `${n / 1000}K` : String(n));
 
-function niceMax(value: number): number {
-  const magnitude = 10 ** Math.floor(Math.log10(value));
-  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]) if (m * magnitude >= value) return m * magnitude;
+/** A round tick step that covers `value` in at most four steps. */
+function niceStep(value: number): number {
+  const raw = value / 4;
+  const magnitude = 10 ** Math.floor(Math.log10(raw));
+  for (const m of [1, 2, 2.5, 3, 4, 5, 10]) if (m * magnitude >= raw) return m * magnitude;
   return 10 * magnitude;
 }
 
@@ -47,12 +49,23 @@ function draw(bench: Bench, t: Theme): string {
   const lo = Math.log10(slowest.chunk) - 0.15;
   const hi = Math.log10(results.at(-1)!.chunk) + 0.15;
   const x = (chunk: number) => LEFT + ((Math.log10(chunk) - lo) / (hi - lo)) * pw;
-  const yMax = niceMax(Math.max(...results.map((r) => r.max)));
+  const step = niceStep(Math.max(...results.map((r) => r.max)));
+  const yMax = step * Math.ceil(Math.max(...results.map((r) => r.max)) / step);
   const y = (v: number) => TOP + ph - (v / yMax) * ph;
 
-  const title = `Throughput peaks at ${num(peak.chunk)} rows per chunk: ${num(peak.median)} rows/s`;
+  const largest = results.at(-1)!;
+  // Only call it a peak if it is one; if the fastest size is the largest tested, the curve is still rising.
+  const title =
+    peak === largest
+      ? `Bigger chunks are faster, with diminishing returns: ${Math.round(largest.median / slowest.median)}x from ${num(slowest.chunk)} to ${num(largest.chunk)} rows`
+      : `Throughput peaks at ${num(peak.chunk)} rows per chunk: ${num(peak.median)} rows/s`;
   const sub1 = `Rows per second posting ${num(bench.config.rows)} transactions. Each chunk is one database transaction,`;
-  const sub2 = `written together with its checkpoint. Median of ${bench.config.repeats} runs; the bars show the slowest to the fastest.`;
+  // Spread bars only earn their place if the runs disagreed enough to see; otherwise say so in words.
+  const spread = Math.max(...results.map((r) => (r.max - r.min) / r.median));
+  const showSpread = spread >= 0.05;
+  const sub2 = showSpread
+    ? `written together with its checkpoint. Median of ${bench.config.repeats} runs; the bars show the slowest to the fastest.`
+    : `written together with its checkpoint. Median of ${bench.config.repeats} runs, which differed by under ${Math.ceil(spread * 100)}%.`;
   const desc =
     `Throughput against chunk size on a log scale. ` +
     results.map((r) => `${num(r.chunk)} rows per chunk: ${num(r.median)} rows per second`).join("; ") + ".";
@@ -67,7 +80,6 @@ function draw(bench: Bench, t: Theme): string {
   add(`<text x="${LEFT}" y="74" font-size="13" fill="${t.ink2}">${sub2}</text>`);
 
   // Gridlines and y ticks.
-  const step = yMax / 4;
   for (let v = 0; v <= yMax + 1e-9; v += step) {
     add(`<line x1="${LEFT}" y1="${y(v).toFixed(1)}" x2="${LEFT + pw}" y2="${y(v).toFixed(1)}" stroke="${v === 0 ? t.axis : t.grid}" stroke-width="1"/>`);
     add(`<text x="${LEFT - 8}" y="${(y(v) + 4).toFixed(1)}" font-size="11" fill="${t.muted}" text-anchor="end" style="font-variant-numeric: tabular-nums">${compact(v)}</text>`);
@@ -79,7 +91,7 @@ function draw(bench: Bench, t: Theme): string {
   add(`<text x="${LEFT + pw / 2}" y="${H - 12}" font-size="11" fill="${t.muted}" text-anchor="middle">rows per chunk (log scale)</text>`);
 
   // Spread of the runs, then the median line, then the points on top.
-  for (const r of results) {
+  for (const r of showSpread ? results : []) {
     add(`<line x1="${x(r.chunk).toFixed(1)}" y1="${y(r.min).toFixed(1)}" x2="${x(r.chunk).toFixed(1)}" y2="${y(r.max).toFixed(1)}" stroke="${t.series}" stroke-opacity="0.35" stroke-width="6" stroke-linecap="round"/>`);
   }
   const d = results.map((r, i) => `${i ? "L" : "M"}${x(r.chunk).toFixed(1)},${y(r.median).toFixed(1)}`).join(" ");
@@ -92,17 +104,20 @@ function draw(bench: Bench, t: Theme): string {
   }
 
   // Direct labels: the slowest size, the peak, and the default if it isn't the peak.
-  const label = (r: Result, line1: string, line2: string) => {
-    const px = x(r.chunk);
-    const anchor = px > LEFT + pw - 90 ? "end" : px < LEFT + 90 ? "start" : "middle";
-    const top = y(r.max) - 26;
+  // The line rises left to right, so a label above a point can run into the next segment; `below` avoids that.
+  const label = (r: Result, line1: string, line2: string, below = false) => {
+    // Below means below and to the right, where a rising line leaves room.
+    const px = below ? x(r.chunk) + 10 : x(r.chunk);
+    const anchor = below ? "start" : px > LEFT + pw - 90 ? "end" : px < LEFT + 90 ? "start" : "middle";
+    const top = below ? y(r.min) + 22 : y(r.max) - 26;
     add(`<text x="${px.toFixed(1)}" y="${top.toFixed(1)}" font-size="12" font-weight="600" fill="${t.ink}" text-anchor="${anchor}">${line1}</text>`);
     add(`<text x="${px.toFixed(1)}" y="${(top + 14).toFixed(1)}" font-size="11" fill="${t.ink2}" text-anchor="${anchor}">${line2}</text>`);
   };
   label(slowest, `${num(slowest.median)} rows/s`, `${num(slowest.chunk)} per chunk`);
-  label(peak, `${num(peak.median)} rows/s`, peak.chunk === DEFAULT_CHUNK ? "peak, and the default" : "peak");
+  const peakName = peak === largest ? "fastest tested" : "peak";
+  label(peak, `${num(peak.median)} rows/s`, peak.chunk === DEFAULT_CHUNK ? `${peakName}, and the default` : `${num(peak.chunk)} per chunk, ${peakName}`);
   const def = results.find((r) => r.chunk === DEFAULT_CHUNK);
-  if (def && def !== peak) label(def, `${num(def.median)} rows/s`, "the default");
+  if (def && def !== peak) label(def, `${num(def.median)} rows/s`, "500 per chunk, the default", true);
 
   add("</svg>");
   return out.join("\n") + "\n";

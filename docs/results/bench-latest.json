@@ -1,0 +1,131 @@
+{
+  "startedAt": "2026-11-18T11:56:34.015Z",
+  "commit": "2b04288",
+  "node": "v22.20.0",
+  "config": {
+    "rows": 20000,
+    "seed": 42,
+    "sizes": [
+      1,
+      10,
+      50,
+      100,
+      250,
+      500,
+      1000,
+      2500,
+      5000
+    ],
+    "repeats": 3
+  },
+  "results": [
+    {
+      "chunk": 1,
+      "transactions": 20000,
+      "rowsPerSecond": [
+        139,
+        140,
+        140
+      ],
+      "median": 140,
+      "min": 139,
+      "max": 140
+    },
+    {
+      "chunk": 10,
+      "transactions": 2000,
+      "rowsPerSecond": [
+        1204,
+        1182,
+        1180
+      ],
+      "median": 1182,
+      "min": 1180,
+      "max": 1204
+    },
+    {
+      "chunk": 50,
+      "transactions": 400,
+      "rowsPerSecond": [
+        3569,
+        3674,
+        3591
+      ],
+      "median": 3591,
+      "min": 3569,
+      "max": 3674
+    },
+    {
+      "chunk": 100,
+      "transactions": 200,
+      "rowsPerSecond": [
+        4990,
+        5103,
+        5027
+      ],
+      "median": 5027,
+      "min": 4990,
+      "max": 5103
+    },
+    {
+      "chunk": 250,
+      "transactions": 80,
+      "rowsPerSecond": [
+        6579,
+        6674,
+        6606
+      ],
+      "median": 6606,
+      "min": 6579,
+      "max": 6674
+    },
+    {
+      "chunk": 500,
+      "transactions": 40,
+      "rowsPerSecond": [
+        7344,
+        7419,
+        7412
+      ],
+      "median": 7412,
+      "min": 7344,
+      "max": 7419
+    },
+    {
+      "chunk": 1000,
+      "transactions": 20,
+      "rowsPerSecond": [
+        8897,
+        8765,
+        8834
+      ],
+      "median": 8834,
+      "min": 8765,
+      "max": 8897
+    },
+    {
+      "chunk": 2500,
+      "transactions": 8,
+      "rowsPerSecond": [
+        9898,
+        10010,
+        9862
+      ],
+      "median": 9898,
+      "min": 9862,
+      "max": 10010
+    },
+    {
+      "chunk": 5000,
+      "transactions": 4,
+      "rowsPerSecond": [
+        10785,
+        10774,
+        10723
+      ],
+      "median": 10774,
+      "min": 10723,
+      "max": 10785
+    }
+  ]
+}

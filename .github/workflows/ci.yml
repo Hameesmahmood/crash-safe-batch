@@ -24,3 +24,9 @@ jobs:
           npm run generate -- --rows 50000 --out a.csv
           npm run generate -- --rows 50000 --out b.csv
           cmp a.csv b.csv
+      - name: Crash test (small)
+        env:
+          DATABASE_URL: postgres://batch:batch@localhost:5433/batch
+        run: |
+          docker compose up -d --wait
+          npm run crash -- --rows 5000 --trials 3 --out crash-ci.json

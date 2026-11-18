@@ -41,6 +41,16 @@ describe("compensation and the notify step", () => {
     expect(await count(db, "SELECT * FROM ledger_entries WHERE reversal")).toBe(0);
   });
 
+  it("retries when the service can't be reached, and says why", async () => {
+    await db.service.close();
+    const runner = testRunner(db);
+    const id = await runner.store.create("ledger-import", { file });
+    await runner.runUntilIdle();
+
+    expect(await runner.store.get(id)).toMatchObject({ status: "compensated", error: expect.stringMatching(/unreachable: ECONNREFUSED/) });
+    expect(await allZero()).toBe(true);
+  });
+
   it("doesn't retry a request the service rejects as invalid", async () => {
     db.service.fail(422);
     const runner = testRunner(db);

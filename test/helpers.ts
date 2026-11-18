@@ -23,7 +23,7 @@ export async function createFixture(): Promise<Fixture> {
     ...db,
     service,
     drop: async () => {
-      await service.close();
+      await service.close().catch(() => {}); // A test may have closed it already.
       await db.drop();
     },
   };

@@ -12,7 +12,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "generate": "node tools/generate-csv.ts",
-    "stub": "node tools/statement-service.ts"
+    "stub": "node tools/statement-service.ts",
+    "crash": "node tools/crash.ts",
+    "bench": "node tools/bench.ts",
+    "chart": "node tools/chart.ts"
   },
   "dependencies": {
     "csv-parse": "^7.0.3",

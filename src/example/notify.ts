@@ -34,12 +34,21 @@ export async function notifyStatementService(baseUrl: string, { tx, run }: StepC
     debitsCents: Number(totals.debits ?? 0),
   };
 
-  const response = await fetch(new URL("/statements", baseUrl), {
-    method: "POST",
-    headers: { "content-type": "application/json", "idempotency-key": `${run.workflow}/${run.id}` },
-    body: JSON.stringify(batch),
-    signal: AbortSignal.timeout(5_000),
-  });
+  const url = new URL("/statements", baseUrl);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", "idempotency-key": `${run.workflow}/${run.id}` },
+      body: JSON.stringify(batch),
+      signal: AbortSignal.timeout(5_000),
+    });
+  } catch (error) {
+    // fetch only says "fetch failed"; the reason (refused, reset, timed out) is in the cause.
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error;
+    const reason = cause instanceof Error ? ((cause as NodeJS.ErrnoException).code ?? cause.message) : String(cause);
+    throw new Error(`statement service at ${url.origin} unreachable: ${reason}`, { cause: error });
+  }
   // Read the body either way, so the connection can be reused.
   const text = await response.text();
   if (response.ok) return;

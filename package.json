@@ -13,6 +13,7 @@
     "test": "vitest run",
     "generate": "node tools/generate-csv.ts",
     "stub": "node tools/statement-service.ts",
+    "demo": "node tools/demo.ts",
     "crash": "node tools/crash.ts",
     "bench": "node tools/bench.ts",
     "chart": "node tools/chart.ts"

@@ -3,7 +3,10 @@
 // starting new ones, until each run finishes. Every interrupted run must match the clean one.
 //
 //   node tools/crash.ts [--rows 50000] [--trials 10] [--workers 2] [--chunk 500] [--lease 1000]
-//                       [--min-life 100] [--max-life 900] [--out docs/results/crash-latest.json]
+//                       [--min-life 100] [--max-life 900] [--notify-fails] [--out docs/results/crash-latest.json]
+//
+// --notify-fails makes the statement service refuse every request, so each run ends by undoing the
+// whole import, and the kills land during the undo as well.
 //
 // Needs Postgres (docker compose up -d). Exits with 1 if any trial differs from the clean run.
 import { spawn, type ChildProcess } from "node:child_process";
@@ -24,6 +27,7 @@ const { values } = parseArgs({
     lease: { type: "string", default: "1000" },
     "min-life": { type: "string", default: "100" },
     "max-life": { type: "string", default: "900" },
+    "notify-fails": { type: "boolean", default: false },
     out: { type: "string", default: "docs/results/crash-latest.json" },
   },
 });
@@ -36,7 +40,9 @@ const config = {
   leaseMs: Number(values.lease),
   minLifeMs: Number(values["min-life"]),
   maxLifeMs: Number(values["max-life"]),
+  notifyFails: values["notify-fails"],
 };
+const expected = config.notifyFails ? "compensated" : "succeeded";
 
 interface Outcome {
   status: string;
@@ -46,8 +52,12 @@ interface Outcome {
   kills: number;
   /** Of those, how many had claimed the run, so died holding it. */
   killsHoldingRun: number;
+  /** Postings, and how many distinct CSV lines they cover. More postings than lines means duplicates. */
   entries: number;
   distinctLines: number;
+  /** The same for reversals, when the run was undone. */
+  reversals: number;
+  distinctReversals: number;
   notifyRequests: number;
   notifyAccepted: number;
 }
@@ -56,6 +66,7 @@ interface Outcome {
 async function importOnce(name: string, file: string, kill: boolean): Promise<Outcome> {
   const db = await scratchDatabase(name);
   const service = await startStatementService();
+  if (config.notifyFails) service.fail(503);
   const store = new RunStore(db.pool, config.leaseMs);
   const id = await store.create("ledger-import", { file });
   const env = { ...process.env, DATABASE_URL: db.url, STATEMENT_SERVICE_URL: service.url };
@@ -103,8 +114,10 @@ async function importOnce(name: string, file: string, kill: boolean): Promise<Ou
     seconds: Math.round(seconds * 10) / 10,
     kills,
     killsHoldingRun,
-    entries: await count("SELECT count(*) AS n FROM ledger_entries"),
-    distinctLines: await count("SELECT count(DISTINCT source_line) AS n FROM ledger_entries"),
+    entries: await count("SELECT count(*) AS n FROM ledger_entries WHERE NOT reversal"),
+    distinctLines: await count("SELECT count(DISTINCT source_line) AS n FROM ledger_entries WHERE NOT reversal"),
+    reversals: await count("SELECT count(*) AS n FROM ledger_entries WHERE reversal"),
+    distinctReversals: await count("SELECT count(DISTINCT source_line) AS n FROM ledger_entries WHERE reversal"),
     notifyRequests: service.requests,
     notifyAccepted: service.accepted.size,
   };
@@ -115,20 +128,23 @@ async function importOnce(name: string, file: string, kill: boolean): Promise<Ou
 
 const file = await ensureCsv(config.rows, config.seed);
 const startedAt = new Date().toISOString();
-console.log(`crash test: ${config.rows.toLocaleString("en")} rows, ${config.trials} trials, ${config.workers} workers, chunk ${config.chunk}`);
+console.log(
+  `crash test: ${config.rows.toLocaleString("en")} rows, ${config.trials} trials, ${config.workers} workers, chunk ${config.chunk}` +
+    (config.notifyFails ? ", statement service failing (every run ends compensated)" : ""),
+);
 
 const clean = await importOnce("crash_clean", file, false);
-if (clean.status !== "succeeded") throw new Error(`The clean run ended ${clean.status}.`);
+if (clean.status !== expected) throw new Error(`The clean run ended ${clean.status}.`);
 console.log(`clean run: ${clean.seconds} s, digest ${clean.digest.slice(0, 12)}`);
 
 const trials: (Outcome & { trial: number; match: boolean })[] = [];
 for (let trial = 1; trial <= config.trials; trial++) {
   const outcome = await importOnce(`crash_trial_${trial}`, file, true);
-  const match = outcome.status === "succeeded" && outcome.digest === clean.digest;
+  const match = outcome.status === expected && outcome.digest === clean.digest;
   trials.push({ trial, match, ...outcome });
   console.log(
-    `trial ${trial}: ${match ? "match" : "MISMATCH"}, ${outcome.kills} kills (${outcome.killsHoldingRun} holding the run), ` +
-      `${outcome.seconds} s, ${outcome.entries} entries, notify sent ${outcome.notifyRequests}x, accepted ${outcome.notifyAccepted}x`,
+    `trial ${trial}: ${match ? "match" : "MISMATCH"} (${outcome.status}), ${outcome.kills} kills (${outcome.killsHoldingRun} holding the run), ` +
+      `${outcome.seconds} s, ${outcome.entries} postings, ${outcome.reversals} reversals, notify sent ${outcome.notifyRequests}x, accepted ${outcome.notifyAccepted}x`,
   );
 }
 
@@ -138,7 +154,7 @@ const summary = {
   mismatches: trials.filter((t) => !t.match).length,
   kills: trials.reduce((n, t) => n + t.kills, 0),
   killsHoldingRun: trials.reduce((n, t) => n + t.killsHoldingRun, 0),
-  duplicateEntries: trials.reduce((n, t) => n + (t.entries - t.distinctLines), 0),
+  duplicateEntries: trials.reduce((n, t) => n + (t.entries - t.distinctLines) + (t.reversals - t.distinctReversals), 0),
   notifyRequests: trials.reduce((n, t) => n + t.notifyRequests, 0),
   notifyAccepted: trials.reduce((n, t) => n + t.notifyAccepted, 0),
 };

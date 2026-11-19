@@ -1,0 +1,86 @@
+{
+  "startedAt": "2026-11-19T09:15:07.176Z",
+  "commit": "c30f0f3-dirty",
+  "node": "v22.20.0",
+  "config": {
+    "rows": 5000,
+    "seed": 42,
+    "trials": 3,
+    "workers": 2,
+    "chunk": 500,
+    "leaseMs": 1000,
+    "minLifeMs": 100,
+    "maxLifeMs": 900,
+    "notifyFails": false
+  },
+  "clean": {
+    "status": "succeeded",
+    "digest": "eb066fb3e0cb8413fd9371e5abe0317cd2fd87027018ab714955ffa0b24d48fd",
+    "seconds": 1.2,
+    "kills": 0,
+    "killsHoldingRun": 0,
+    "entries": 5000,
+    "distinctLines": 5000,
+    "reversals": 0,
+    "distinctReversals": 0,
+    "notifyRequests": 1,
+    "notifyAccepted": 1
+  },
+  "summary": {
+    "trials": 3,
+    "matches": 3,
+    "mismatches": 0,
+    "kills": 68,
+    "killsHoldingRun": 12,
+    "duplicateEntries": 0,
+    "notifyRequests": 3,
+    "notifyAccepted": 3
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "match": true,
+      "status": "succeeded",
+      "digest": "eb066fb3e0cb8413fd9371e5abe0317cd2fd87027018ab714955ffa0b24d48fd",
+      "seconds": 3.6,
+      "kills": 14,
+      "killsHoldingRun": 2,
+      "entries": 5000,
+      "distinctLines": 5000,
+      "reversals": 0,
+      "distinctReversals": 0,
+      "notifyRequests": 1,
+      "notifyAccepted": 1
+    },
+    {
+      "trial": 2,
+      "match": true,
+      "status": "succeeded",
+      "digest": "eb066fb3e0cb8413fd9371e5abe0317cd2fd87027018ab714955ffa0b24d48fd",
+      "seconds": 9.2,
+      "kills": 37,
+      "killsHoldingRun": 7,
+      "entries": 5000,
+      "distinctLines": 5000,
+      "reversals": 0,
+      "distinctReversals": 0,
+      "notifyRequests": 1,
+      "notifyAccepted": 1
+    },
+    {
+      "trial": 3,
+      "match": true,
+      "status": "succeeded",
+      "digest": "eb066fb3e0cb8413fd9371e5abe0317cd2fd87027018ab714955ffa0b24d48fd",
+      "seconds": 4.7,
+      "kills": 17,
+      "killsHoldingRun": 3,
+      "entries": 5000,
+      "distinctLines": 5000,
+      "reversals": 0,
+      "distinctReversals": 0,
+      "notifyRequests": 1,
+      "notifyAccepted": 1
+    }
+  ]
+}

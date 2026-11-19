@@ -1,0 +1,86 @@
+{
+  "startedAt": "2026-11-19T09:01:38.119Z",
+  "commit": "c30f0f3-dirty",
+  "node": "v22.20.0",
+  "config": {
+    "rows": 5000,
+    "seed": 42,
+    "trials": 3,
+    "workers": 2,
+    "chunk": 500,
+    "leaseMs": 1000,
+    "minLifeMs": 100,
+    "maxLifeMs": 900,
+    "notifyFails": false
+  },
+  "clean": {
+    "status": "succeeded",
+    "digest": "eb066fb3e0cb8413fd9371e5abe0317cd2fd87027018ab714955ffa0b24d48fd",
+    "seconds": 1.7,
+    "kills": 0,
+    "killsHoldingRun": 0,
+    "entries": 5000,
+    "distinctLines": 5000,
+    "reversals": 0,
+    "distinctReversals": 0,
+    "notifyRequests": 1,
+    "notifyAccepted": 1
+  },
+  "summary": {
+    "trials": 3,
+    "matches": 0,
+    "mismatches": 3,
+    "kills": 3199,
+    "killsHoldingRun": 545,
+    "duplicateEntries": 378500,
+    "notifyRequests": 3,
+    "notifyAccepted": 3
+  },
+  "trials": [
+    {
+      "trial": 1,
+      "match": false,
+      "status": "succeeded",
+      "digest": "1dc1699285be692597b6c1e9d5c1688d5f93c52a729824565d21dce733058120",
+      "seconds": 614.4,
+      "kills": 2427,
+      "killsHoldingRun": 412,
+      "entries": 153500,
+      "distinctLines": 5000,
+      "reversals": 0,
+      "distinctReversals": 0,
+      "notifyRequests": 1,
+      "notifyAccepted": 1
+    },
+    {
+      "trial": 2,
+      "match": false,
+      "status": "succeeded",
+      "digest": "c1f5fff056a6c9980386877ee9ad809ca0c8bbd90c1140cdda5a06cc496b83af",
+      "seconds": 118.3,
+      "kills": 478,
+      "killsHoldingRun": 83,
+      "entries": 155500,
+      "distinctLines": 5000,
+      "reversals": 0,
+      "distinctReversals": 0,
+      "notifyRequests": 1,
+      "notifyAccepted": 1
+    },
+    {
+      "trial": 3,
+      "match": false,
+      "status": "succeeded",
+      "digest": "c7345910bae9c9be9a0460cca7dfdcfd9aea246ffbc4f18ec8688a27cf190a05",
+      "seconds": 71.2,
+      "kills": 294,
+      "killsHoldingRun": 50,
+      "entries": 84500,
+      "distinctLines": 5000,
+      "reversals": 0,
+      "distinctReversals": 0,
+      "notifyRequests": 1,
+      "notifyAccepted": 1
+    }
+  ]
+}
